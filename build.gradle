@@ -11,10 +11,18 @@ repositories {
 
 dependencies {
     implementation 'org.apache.groovy:groovy:4.0.14'
+    implementation fileTree(dir: 'lib', include: '*.jar')
     testImplementation platform('org.junit:junit-bom:5.10.0')
     testImplementation 'org.junit.jupiter:junit-jupiter'
 }
 
 test {
     useJUnitPlatform()
+}
+
+
+jar {
+    archiveBaseName = 'createAllocations'
+    archiveVersion = '4.0.14'
+    from 'src/main/groovy/org/example/CreateAllocations.groovy'
 }
