@@ -3,56 +3,47 @@ package org.example
 import com.niku.xmlserver.blob.NkCalendar
 import com.niku.xmlserver.blob.NkCurve
 import com.niku.xmlserver.blob.NkSegment
+import com.niku.xmlserver.core.NkDate
+import com.niku.xmlserver.core.NkTime
 import de.itdesign.clarity.logging.CommonLogger
 import groovy.sql.GroovyRowResult
 import groovy.sql.Sql
 import groovy.time.TimeCategory
 import groovy.transform.Field
 import java.sql.Blob
-import java.sql.Connection
-import org.example.utils.dbUtil
-import java.time.LocalDate
+import java.text.SimpleDateFormat
 
-Connection connection = dbUtil.connect()
 sql = new Sql(connection)
 
 @Field CommonLogger cmnLog = new CommonLogger(this)
 cmnLog.setFailJobOnError(true)
 
-PROJECT_NAME = null
-RESOURCE_NAME = null
+PROJECT = null
+RESOURCE = null
 FROM_DATE = null
 TO_DATE = null
 PERIOD = null
 
-List<GroovyRowResult> getSrcOtherWorkData(String ciType) {
-    println "Executing query to retrieve source data for CI Type: $ciType"
+
+GroovyRowResult getProject(String projectId) {
     def query = """
-               SELECT 
-                   src.id, src.code, src.name, src.schedule_start, src.schedule_finish 
-               FROM 
-                   inv_investments src 
-                   INNER JOIN inv_investments tgt 
-                       ON UPPER(CONCAT(SUBSTR(tgt.code, 0, 3), SUBSTR(tgt.code, 4, 6))) = src.code 
-                       AND tgt.odf_object_code = ?
-            """
-    def result = sql.rows(query, [ciType])
-    println "Retrieved Source Data: ${result}"
+                SELECT 
+                      src.id 
+                    , src.code
+                    , src.name
+                    , src.schedule_start
+                    , src.schedule_finish 
+                FROM 
+                    inv_investments src 
+                    where src.id = ?
+                """
+    def result = sql.firstRow(query, [projectId])
     return result
 }
 
-// Fetch team data based on investment ID and date range
-List<GroovyRowResult> getTeamData(Integer investmentId, Date fromDate, Integer periods) {
-    println "Fetching team data for Investment ID: $investmentId, From Date: $fromDate, Periods: $periods"
-    LocalDate localStartDate = fromDate.toLocalDate()
-    LocalDate localEndDate = localStartDate.plusMonths(periods)
-    java.sql.Date sqlStartDate = java.sql.Date.valueOf(localStartDate)
-    java.sql.Date sqlEndDate = java.sql.Date.valueOf(localEndDate)
-    println(sqlStartDate)
-    println(sqlEndDate)
-
+GroovyRowResult getResource(String projectId, String resourceId) {
     def query = """
-        select 
+               SELECT 
             team.PRUID,
             team.prid,
             team.PRRESOURCEID,
@@ -60,23 +51,19 @@ List<GroovyRowResult> getTeamData(Integer investmentId, Date fromDate, Integer p
             team.HARD_CURVE,
             team.PRAVAILSTART,
             team.PRAVAILFINISH
-        from 
+        FROM 
             prteam team
-        inner join inv_investments ii on ii.id = team.prprojectid
-        where ii.id = ? 
-        
-    """
-
-    def result = sql.rows(query, [investmentId])
-    println "Team Data Retrieved: ${result}"
-
+        INNER JOIN inv_investments ii ON ii.id = team.prprojectid
+        WHERE ii.id = ? AND team.PRRESOURCEID = ?
+                """
+    def result = sql.firstRow(query, [projectId, resourceId])
     return result
 }
 
-// Convert Blob data to NkCurve object
 NkCurve getCurveFromBlob(GroovyRowResult eachResource, String curveName) {
     println "Converting Blob to NkCurve for curve: $curveName"
-    Blob curveBlob = eachResource?.get(curveName)
+    Blob curveBlob = eachResource?.get(curveName) as Blob
+
     if (!curveBlob) {
         println "Error: Curve Blob for $curveName is null."
         return null
@@ -89,38 +76,50 @@ NkCurve getCurveFromBlob(GroovyRowResult eachResource, String curveName) {
     return curve
 }
 
-// Split the curve into time segments based on the given period
-NkCurve splitCurveByPeriod(NkCurve curve, Date start, Integer periods) {
-    println "Splitting curve into segments for period starting on $start and period count: $periods"
+NkCurve getFilterSegments(NkCurve curve, Date start, Integer periods, String periodType) {
+    println "Filtering curve for periods starting from $start with $periods $periodType periods."
     if (!curve) {
-        println "Error: curve is null, cannot split."
+        println "Error: curve is null, cannot filter."
         return null
     }
+    NkCurve filteredCurve = new NkCurve(1)
 
-    NkCurve splitCurve = new NkCurve(1)
     use(TimeCategory) {
         for (int i = 0; i < periods; i++) {
-            def segmentStartDate = start + i.month
-            def segmentEndDate = start + i.month + 1.month
-            println "Processing period: ${i + 1}, Start: $segmentStartDate, End: $segmentEndDate"
-            curve.segments.each { NkSegment segment ->
-                if (segment.startDate >= segmentStartDate && segment.finishDate <= segmentEndDate) {
-
-                    println "Adding Segment: $segment"
-                    splitCurve.segments.setSegment(segment)
-                }
+            def periodStartDate
+            def periodEndDate
+            switch (periodType) {
+                case "MONTHLY":
+                    periodStartDate = start + i.month
+                    periodEndDate = start + (i + 1).month
+                    break
+                case "QUARTERLY":
+                    periodStartDate = start + (i * 3).months
+                    periodEndDate = start + ((i + 1) * 3).months
+                    break
+                case "YEARLY":
+                    periodStartDate = start + (i * 12).months
+                    periodEndDate = start + ((i + 1) * 12).months
+                    break
+                default:
+                    throw new Exception("Invalid period type: $periodType")
             }
-            def value = curve.getSum(segmentStartDate, segmentEndDate)
-            print("Added Value")
-            println(value)
+            curve.segments.each { NkSegment segment ->
+                if (segment.startDate >= periodStartDate && segment.finishDate <= periodEndDate) {
+                    filteredCurve.segments.setSegment(segment)
+                }
+
+            }
+            println " the size of the filter curve is ${filteredCurve.segments.size()}"
+            if (filteredCurve.segments.size() == 0) {
+                filteredCurve.segments.setSegment(NkTime.toNkTime(periodStartDate), NkTime.toNkTime(periodEndDate), 0.0D, null)
+                println "No segments found for this period. Added default segment with 0 allocation."
+            }
         }
     }
-
-    println "Final Split Curve: $splitCurve"
-    return splitCurve
+    return filteredCurve
 }
 
-// Write the data to CSV file
 def writeToCSV(data, outputFile) {
     println "Writing data to CSV file: $outputFile"
     File file = new File(outputFile)
@@ -134,90 +133,10 @@ def writeToCSV(data, outputFile) {
     println "CSV file has been written successfully."
 }
 
-
-def generateCsvForAllocations() {
-    println "Starting CSV generation process"
-    //List<GroovyRowResult> investments = getSrcOtherWorkData("project")
-    // Create a list of maps, not GroovyRowResult
-    List<Map<String, Object>> investments = [
-            [ID: 5003000, CODE: 'PR2001', NAME: 'Website Redesign', SCHEDULE_START: '2024-12-12 08:00:00.000', SCHEDULE_FINISH: '2025-01-06 17:00:00.000']
-    ]
-
-    List<GroovyRowResult> groovyRowResults = investments.collect { new GroovyRowResult(it) }
-    List<Map<String, Object>> csvData = []
-    println "Processing Investments: ${investments.size()} found."
-
-    groovyRowResults.each { investment ->
-        println "Processing Investment: ${investment.name}"
-
-        Date fromDate = FROM_DATE ?: Date.parse("yyyy-MM-dd HH:mm:ss.S", investment.SCHEDULE_START as String)
-        Date toDate = TO_DATE ?: Date.parse("yyyy-MM-dd HH:mm:ss.S", investment.SCHEDULE_FINISH as String)
-
-        Integer periods = getNumberOfMonthsBetween(fromDate, toDate)
-        println "From Date: $fromDate, To Date: $toDate, Periods: $periods"
-        println(investment.id + "id")
-        List<GroovyRowResult> teamData = getTeamData(investment.id as Integer, fromDate, periods)
-
-
-        teamData.each { sourceTeamData ->
-            println "Processing Source Team Data: $sourceTeamData"
-            NkCurve softCurve = getCurveFromBlob(sourceTeamData, "PRALLOCCURVE")
-            println("Soft ")
-            println(softCurve)
-            NkCurve hardCurve = getCurveFromBlob(sourceTeamData, "HARD_CURVE")
-            print("hard ")
-            println(hardCurve)
-            NkCalendar calender = new NkCalendar()
-
-            def regex = /\((\d+(\.\d+)?)\)/
-
-            def matches = (softCurve =~ regex)  // Find matches for the regex
-
-            matches.each { match ->
-                def hoursAsNumber = match[1].toDouble()
-                println "Extracted hours: ${hoursAsNumber / 3600}"
-            }
-            // Handle case when curve is null
-            if (!softCurve) {
-                println "Skipping team data due to missing curves for investment ${investment.name} (ID: ${investment.id})"
-                return // Skip processing this team data if curves are null
-            }
-
-            // Split the curves into monthly segments
-            NkCurve splitSoftCurve = splitCurveByPeriod(softCurve, fromDate, periods)
-            // NkCurve splitHardCurve = splitCurveByPeriod(hardCurve, fromDate, periods)
-
-            // Ensure that the split curves are not null
-
-            if (splitSoftCurve) {
-                splitSoftCurve.segments.eachWithIndex { NkSegment segment, index ->
-                    def row = [
-                            investment.name,
-                            sourceTeamData.PRRESOURCEID,
-                            segment.startDate.format("dd.MMM.yyyy"),
-                            segment.finishDate.format("dd.MMM.yyyy"),
-                            //splitHardCurve.segments[index]?.rate ?: 0, // Hard Allocation
-                            segment.rate // Soft Allocation
-                    ]
-                    println "Adding Row to CSV Data: $row"
-                    csvData << row
-                }
-            } else {
-                println "Warning: Could not split curves for investment ${investment.name} (ID: ${investment.id})"
-            }
-        }
-    }
-
-    writeToCSV(csvData, "allocation_output.csv")
-    println "CSV Generation Complete."
-}
-
-// Calculate number of months between two dates
-Integer getNumberOfMonthsBetween(Date startDate, Date endDate) {
-    println "Calculating months between $startDate and $endDate"
+Integer getNumberOfPeriods(Date startDate, Date endDate, String period) {
+    println "Calculating periods between $startDate and $endDate for period type: $period"
     Calendar startCal = Calendar.getInstance()
     Calendar endCal = Calendar.getInstance()
-
     startCal.setTime(startDate)
     endCal.setTime(endDate)
 
@@ -230,44 +149,177 @@ Integer getNumberOfMonthsBetween(Date startDate, Date endDate) {
     }
 
     int totalMonthsDiff = (yearsDiff * 12) + monthsDiff
-    println "Total months difference: $totalMonthsDiff"
-    return totalMonthsDiff
+    int periods = 0
+
+    switch (period) {
+        case "MONTHLY":
+            periods = totalMonthsDiff
+            break
+        case "QUARTERLY":
+            periods = Math.ceil(totalMonthsDiff / 3.0) as Integer
+            break
+        case "YEARLY":
+            periods = yearsDiff + (monthsDiff > 0 ? 1 : 0)
+            break
+        default:
+            throw new Exception("Invalid period type: $period")
+    }
+
+    println "Total periods: $periods"
+    return periods
 }
 
+def getPersonDays(NkCurve curve, Date fromDate, Date toDate) {
+    def days = 0
+    NkCalendar calendar = new NkCalendar()
+    switch (PERIOD) {
+        case "MONTHLY":
+            def nkPeriodStartDate = NkTime.toNkTime(fromDate)
+            def rate = curve.segments.getRate(nkPeriodStartDate)
+            def startDate = new NkDate(fromDate, false)
+            def endDate = new NkDate(toDate, false)
+            def diffWorkingDays = calendar.diffWorkday(startDate, endDate)
+            days = (rate * diffWorkingDays).round(2)
+            break
+        case "QUARTERLY":
+            def nkPeriodStartDate = NkTime.toNkTime(fromDate)
+            def rate = curve.segments.getRate(nkPeriodStartDate)
+            def startDate = new NkDate(fromDate, false)
+            def endDate = new NkDate(toDate, false)
+            def diffWorkingDays = calendar.diffWorkday(startDate, endDate)
+            days = (rate * diffWorkingDays).round(2)
+            break
+        case "YEARLY":
+            def nkPeriodStartDate = NkTime.toNkTime(fromDate)
+            def rate = curve.segments.getRate(nkPeriodStartDate)
+            def startDate = new NkDate(fromDate, false)
+            def endDate = new NkDate(toDate, false)
+            def diffWorkingDays = calendar.diffWorkday(startDate, endDate)
+            days = (rate * diffWorkingDays).round(2)
+            break
+        default:
+            throw new IllegalArgumentException("Unsupported period: $PERIOD")
+    }
+    return days
+}
+
+def createCsv(NkCurve curve, GroovyRowResult investment, GroovyRowResult teamData, NkCurve softCurve, NkCurve hardCurve) {
+    List<List<String>> csvData = []
+    def fromDate = FROM_DATE
+    def toDate = TO_DATE
+    NkCalendar calendar = new NkCalendar()
+    println("hey")
+    println(curve)
+    use(TimeCategory) {
+        // Loop through the date range based on the PERIOD type
+        def currentStartDate = fromDate
+        while (currentStartDate <= toDate) {
+            def currentEndDate
+
+            // Handle different periods: Monthly, Quarterly
+            switch (PERIOD) {
+                case "MONTHLY":
+                    currentEndDate = currentStartDate + 1.month - 1.day
+                    break
+                case "QUARTERLY":
+                    currentEndDate = currentStartDate + 3.month - 1.day
+                    break
+                case "YEARLY":
+                    currentEndDate = currentStartDate + 1.year - 1.day
+                    break
+                default:
+                    throw new IllegalArgumentException("Unsupported period: $PERIOD")
+            }
+
+            // Ensure that the period does not exceed TO_DATE
+            if (currentEndDate > toDate) {
+                currentEndDate = toDate
+            }
+            def days = getPersonDays(curve, currentStartDate, currentEndDate)
+            def formatDate = new SimpleDateFormat("dd.MMM.yyyy")
+            def formatStartDate = formatDate.format(currentStartDate)
+            def formatEndDate = formatDate.format(currentEndDate)
+
+            // Add a row to the CSV data
+            def row = [
+                    investment.name,
+                    teamData.PRRESOURCEID,
+                    formatStartDate,
+                    formatEndDate,
+                    softCurve ? days : 0,
+                    hardCurve ? days : 0
+            ]
+            csvData << row
+            switch (PERIOD) {
+                case "MONTHLY":
+                    currentStartDate = currentStartDate + 1.month
+                    break
+                case "QUARTERLY":
+                    currentStartDate = currentStartDate + 3.month
+                    break
+                case "YEARLY":
+                    currentStartDate = currentStartDate + 1.year
+                    break
+            }
+        }
+    }
+    writeToCSV(csvData, "allocation_output.csv")
+    return csvData
+}
+
+def generateCsvForAllocations(String projectId, String resourceId, Date fromDate, Date toDate, String period) {
+    GroovyRowResult investment = getProject(projectId)
+    Integer periods = getNumberOfPeriods(fromDate, toDate, period)
+    GroovyRowResult teamData = getResource(investment.id as String, resourceId)
+    NkCurve softCurve = getCurveFromBlob(teamData, "PRALLOCCURVE")
+    NkCurve hardCurve = getCurveFromBlob(teamData, "HARD_CURVE")
+    if (softCurve) {
+        filterSoftCurve = getFilterSegments(softCurve, fromDate, periods, period)
+        createCsv(filterSoftCurve, investment, teamData, softCurve, hardCurve)
+    }
+    if (hardCurve) {
+        filterHardCurve = getFilterSegments(hardCurve, fromDate, periods, period)
+        createCsv(filterHardCurve, investment, teamData, softCurve, hardCurve)
+    }
+}
 
 void assertParameters() {
     cmnLog.info "Parameters passed to the job: [Target CI Type: ${binding.variables.get('z_project_name')}, Target PF Code: ${binding.variables.get('z_resource_name')}, From: ${binding.variables.get('z_from_date')}, To: ${binding.variables.get('z_to_date')}]"
 
-    if (!binding.variables.containsKey("z_from_date") || z_from_date == null || z_from_date == "") {
-        FROM_DATE = convertStringParameterToDate("date_startofcurrentyear")
-    } else {
-        FROM_DATE = getMonthStart(convertStringParameterToDate(z_from_date))
+    if (!binding.variables.containsKey("z_from_date")) {
+        def STRING_DATE = binding.variables.get('z_from_date')
+        def formattedString = STRING_DATE.replace("T", " ")
+        def date = Date.parse("yyyy-MM-dd HH:mm:ss", formattedString)
+        FROM_DATE = date
+
     }
 
-    if (binding.variables.containsKey("z_to_date") && z_to_date != null && z_to_date != "") {
-        TO_DATE = getMonthEnd(convertStringParameterToDate(z_to_date))
+    if (binding.variables.containsKey("z_to_date")) {
+        def STRING_DATE = binding.variables.get('z_to_date')
+        def formattedString = STRING_DATE.replace("T", " ")
+        def date = Date.parse("yyyy-MM-dd HH:mm:ss", formattedString)
+        TO_DATE = date
     }
 
     if (TO_DATE != null && FROM_DATE.after(TO_DATE)) {
         throw new Exception("The Date from when allocations to be read '${FROM_DATE}' lies after the Date until when allocations to be read '${TO_DATE}'")
     }
-    PROJECT_NAME = binding.variables.get('z_project_name')
-    RESOURCE_NAME = binding.variables.get('z_resource_name')
+
+    PROJECT = binding.variables.get('z_project')
+    cmnLog.info "Project:-${PROJECT}"
+    RESOURCE = binding.variables.get('z_resource')
+    cmnLog.info "Resource:-${RESOURCE}"
     PERIOD = binding.variables.get('z_period')
+    cmnLog.info "Period:-${PERIOD}"
+
+    generateCsvForAllocations(PROJECT as String, RESOURCE as String, FROM_DATE, TO_DATE, PERIOD as String)
 
 }
 
-
 def runScript() {
-    cmnLog.info "Started migrating allocations at:-${new Date()}"
-    generateCsvForAllocations()
-    //assertParameters()
-//    def oldAutoCommit = sql.connection.autoCommit
-//    sql.connection.autoCommit = true
-//    assertParameters()
-//    migrateOtherWorkAllocations()
-//    sql.connection.autoCommit = oldAutoCommit
-    cmnLog.info "Finished migrating allocations at:${new Date()}"
+    cmnLog.info "Started exporting allocations at:-${new Date()}"
+    assertParameters()
+    cmnLog.info "Finished exporting allocations at:${new Date()}"
 }
 
 runScript()
