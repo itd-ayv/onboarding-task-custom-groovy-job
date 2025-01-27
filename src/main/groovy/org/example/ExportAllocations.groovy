@@ -309,7 +309,7 @@ void assertParameters() {
 
     PROJECT = binding.variables.get('z_project')
     cmnLog.info "Project:-${PROJECT}"
-    RESOURCE = binding.variables.get('z_resource_name')
+    RESOURCE = binding.variables.get('z_resource')
     cmnLog.info "Resource:-${RESOURCE}"
     PERIOD = binding.variables.get('z_period')
     cmnLog.info "Period:-${PERIOD}"
