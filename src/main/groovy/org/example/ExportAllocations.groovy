@@ -11,6 +11,8 @@ import groovy.sql.Sql
 import groovy.time.TimeCategory
 import groovy.transform.Field
 import java.sql.Blob
+import java.sql.Connection
+import java.sql.DriverManager
 import java.text.SimpleDateFormat
 
 sql = new Sql(connection)
@@ -18,11 +20,11 @@ sql = new Sql(connection)
 @Field CommonLogger cmnLog = new CommonLogger(this)
 cmnLog.setFailJobOnError(true)
 
-PROJECT = null
-RESOURCE = null
-FROM_DATE = null
-TO_DATE = null
-PERIOD = null
+PROJECT = "5001123"
+RESOURCE = "5004065"
+FROM_DATE = "2024-8-01"
+TO_DATE = "2024-12-01"
+PERIOD = "MONTHLY"
 
 
 GroovyRowResult getProject(String projectId) {
@@ -159,7 +161,7 @@ Integer getNumberOfPeriods(Date startDate, Date endDate, String period) {
             periods = Math.ceil(totalMonthsDiff / 3.0) as Integer
             break
         case "YEARLY":
-            periods = yearsDiff + (monthsDiff > 0 ? 1 : 0)
+            periods = yearsDiff + (monthsDiff > 0 ? 1 : 0) // If there are remaining months, add one more period
             break
         default:
             throw new Exception("Invalid period type: $period")
@@ -288,7 +290,7 @@ void assertParameters() {
 
     if (!binding.variables.containsKey("z_from_date")) {
         def STRING_DATE = binding.variables.get('z_from_date')
-        def formattedString = STRING_DATE.replace("T", " ")
+        def formattedString = STRING_DATE.replace("T", " ") // Replace T with space
         def date = Date.parse("yyyy-MM-dd HH:mm:ss", formattedString)
         FROM_DATE = date
 
@@ -296,7 +298,7 @@ void assertParameters() {
 
     if (binding.variables.containsKey("z_to_date")) {
         def STRING_DATE = binding.variables.get('z_to_date')
-        def formattedString = STRING_DATE.replace("T", " ")
+        def formattedString = STRING_DATE.replace("T", " ") // Replace T with space
         def date = Date.parse("yyyy-MM-dd HH:mm:ss", formattedString)
         TO_DATE = date
     }
@@ -307,7 +309,7 @@ void assertParameters() {
 
     PROJECT = binding.variables.get('z_project')
     cmnLog.info "Project:-${PROJECT}"
-    RESOURCE = binding.variables.get('z_resource')
+    RESOURCE = binding.variables.get('z_resource_name')
     cmnLog.info "Resource:-${RESOURCE}"
     PERIOD = binding.variables.get('z_period')
     cmnLog.info "Period:-${PERIOD}"
